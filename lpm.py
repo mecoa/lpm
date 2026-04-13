@@ -9,6 +9,7 @@ import sqlite3
 import shutil
 from datetime import datetime
 from pathlib import Path
+import subprocess
 
 import click
 
@@ -58,7 +59,7 @@ def init_db():
 
 
 @click.group()
-@click.version_option(version="1.0.0")
+@click.version_option(version="0.1.1")
 def cli():
     """
     CLI 入口组。
@@ -66,46 +67,91 @@ def cli():
     """
     init_db()
 
-
+def cleanup_installed_files(conn, software_name):
+    """清理已安装的文件（用于回滚）"""
+    cursor = conn.execute("SELECT file_path FROM tracked_files WHERE software_name = ?", (software_name,))
+    files = cursor.fetchall()
+    for file_path in files:
+        path = Path(file_path[0])
+        if path.exists():
+            path.unlink()
+    conn.execute("DELETE FROM tracked_files WHERE software_name = ?", (software_name,))
+    conn.commit()
 @cli.command()
 @click.argument("file_path", type=click.Path(exists=True))
 @click.argument("software_name")
-def install(file_path, software_name):
+@click.argument("install_path", type=click.Path())
+def install(file_path, software_name, install_path):
     """
-    安装（追踪）一个文件，并将其关联到指定的软件名称。
+    从文件安装到指定目录，跟踪复制过的文件
     
     参数：
-    - file_path: 要追踪的文件路径（必须存在）
+    - file_path: 下载的文件路径
     - software_name: 软件名称（用于分组管理）
+    - install_path: 安装目录
     
     行为：
     - 如果文件未被追踪，则新增一条记录
-    - 如果文件已被追踪，则更新其所属软件和安装时间
+    - 无法确保更新的安全性，要求用户卸载旧版本
     """
-    # 将路径转换为绝对路径，确保不同工作目录下的一致性
-    file_path = str(Path(file_path).resolve())
-    # 使用 ISO 格式存储时间，便于阅读和跨系统兼容
-    installed_at = datetime.now().isoformat()
-
     conn = get_db()
+    
+    # 修复1: 检查软件名是否已存在（修正拼写错误 DISTINGCT -> DISTINCT）
+    cursor = conn.execute("SELECT DISTINCT software_name FROM tracked_files")
+    existing_names = [row[0] for row in cursor.fetchall()]
+    
+    if software_name in existing_names:
+        print(f"软件 '{software_name}' 已存在，请先卸载旧版本")
+        conn.close()
+        return
+    
+    file_path = Path(file_path)
+    install_path = Path(install_path)
+    
+    # 修复2: 确保目标目录存在
+    install_path.mkdir(parents=True, exist_ok=True)
+    
+    # 修复3: 正确处理文件遍历（如果是单个文件而不是目录）
+    files_to_copy = []
+    if file_path.is_file():
+        files_to_copy = [(file_path.parent, file_path)]
+    else:
+        files_to_copy = [(root, file) for root, _, files in file_path.walk() for file in files]
+    
     try:
-        # 尝试插入新记录
-        conn.execute(
-            "INSERT INTO tracked_files (file_path, software_name, installed_at) VALUES (?, ?, ?)",
-            (file_path, software_name, installed_at),
-        )
+        for root, file in files_to_copy:
+            src_path = Path(root) / file if isinstance(root, Path) else Path(root) / Path(file).name
+            if isinstance(root, Path) and root != file_path:
+                # 对于目录结构，计算相对路径
+                rel_path = Path(root).relative_to(file_path) if root != file_path.parent else Path()
+            else:
+                rel_path = Path()
+            
+            dest_path = install_path / rel_path / Path(file).name
+            
+            # 确保目标目录存在
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 复制文件
+            shutil.copy2(src_path, dest_path)  # 使用copy2保留元数据
+            
+            # 记录信息
+            conn.execute(
+                "INSERT INTO tracked_files (file_path, software_name, installed_at) VALUES (?, ?, ?)",
+                (str(dest_path), software_name, datetime.now().isoformat()),
+            )
+        
+        # 修复4: 统一提交事务（在循环外）
         conn.commit()
-        click.echo(f"Tracked: {file_path}")
-        click.echo(f"Software: {software_name}")
-        click.echo(f"Time: {installed_at}")
-    except sqlite3.IntegrityError:
-        # 如果文件已存在（违反 UNIQUE 约束），则更新现有记录
-        conn.execute(
-            "UPDATE tracked_files SET software_name = ?, installed_at = ? WHERE file_path = ?",
-            (software_name, installed_at, file_path),
-        )
-        conn.commit()
-        click.echo(f"Updated tracking for: {file_path}")
+        print(f"成功安装 {software_name} 到 {install_path}")
+        
+    except Exception as e:
+        # 修复5: 发生错误时回滚
+        conn.rollback()
+        print(f"安装失败: {e}")
+        # 清理已复制的文件
+        cleanup_installed_files(conn, software_name)
+        raise
     finally:
         conn.close()
 
@@ -129,32 +175,35 @@ def list(software, all):
             "SELECT * FROM tracked_files WHERE software_name = ? ORDER BY installed_at DESC",
             (software,),
         ).fetchall()
-        click.echo(f"Files for software: {software}")
+        if not rows:
+            click.echo("No files found.")
+        click.echo(f'{software} has files:')
+        for row in rows:
+            click.echo(f'{row['file_path']} : installed at {row['installed_at']}')
+        conn.close()
+        return
     elif all:
         # 显示所有记录
         rows = conn.execute(
             "SELECT * FROM tracked_files ORDER BY installed_at DESC"
         ).fetchall()
         click.echo("All tracked files:")
+        if not rows:
+            click.echo("No files found.")
+        for row in rows:
+            click.echo(f"{row['software_name']} : {row['file_path']} : installed at {row['installed_at']}")
+        conn.close()
+        return
     else:
         # 默认模式：按软件名称分组统计文件数量
         rows = conn.execute(
-            "SELECT software_name, COUNT(*) as count FROM tracked_files GROUP BY software_name"
+            "SELECT software_name, COUNT(*) as count, MAX(installed_at) as installed  FROM tracked_files GROUP BY software_name"
         ).fetchall()
         for row in rows:
-            click.echo(f"{row['software_name']}: {row['count']} files")
+            click.echo(f"{row['software_name']}: {row['count']} files installed at {row['installed']}")
         conn.close()
         return
 
-    if not rows:
-        click.echo("No files found.")
-    else:
-        for row in rows:
-            click.echo(f"  [{row['id']}] {row['file_path']}")
-            click.echo(
-                f"      Software: {row['software_name']} | Installed: {row['installed_at']}"
-            )
-    conn.close()
 
 
 @cli.command()
