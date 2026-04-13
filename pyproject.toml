@@ -1,9 +1,11 @@
 [project]
 name = "lpm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.3.2",
 ]
+[project.scripts]
+lpm = "main:cli"
