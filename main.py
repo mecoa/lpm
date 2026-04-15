@@ -9,7 +9,6 @@ import sqlite3
 import shutil
 from datetime import datetime
 from pathlib import Path
-import subprocess
 
 import click
 
@@ -106,8 +105,8 @@ def install(file_path, software_name, install_path):
         conn.close()
         return
     
-    file_path = Path(file_path)
-    install_path = Path(install_path)
+    file_path = Path(file_path).resolve()
+    install_path = Path(install_path).resolve()
     
     # 修复2: 确保目标目录存在
     install_path.mkdir(parents=True, exist_ok=True)
@@ -121,14 +120,14 @@ def install(file_path, software_name, install_path):
     
     try:
         for root, file in files_to_copy:
-            src_path = Path(root) / file if isinstance(root, Path) else Path(root) / Path(file).name
+            src_path = root / file
             if isinstance(root, Path) and root != file_path:
                 # 对于目录结构，计算相对路径
                 rel_path = Path(root).relative_to(file_path) if root != file_path.parent else Path()
             else:
                 rel_path = Path()
             
-            dest_path = install_path / rel_path / Path(file).name
+            dest_path = install_path / rel_path / file
             
             # 确保目标目录存在
             dest_path.parent.mkdir(parents=True, exist_ok=True)
