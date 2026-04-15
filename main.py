@@ -59,7 +59,7 @@ def init_db():
 
 
 @click.group()
-@click.version_option(version="0.1.1")
+@click.version_option(version="0.1.2")
 def cli():
     """
     CLI 入口组。
@@ -82,6 +82,7 @@ def cleanup_installed_files(conn, software_name):
 @click.argument("software_name")
 @click.argument("install_path", type=click.Path())
 def install(file_path, software_name, install_path):
+    """从文件安装到指定目录 需要 -file_path -software_name -install_path"""
     """
     从文件安装到指定目录，跟踪复制过的文件
     
@@ -155,11 +156,56 @@ def install(file_path, software_name, install_path):
     finally:
         conn.close()
 
+@cli.command()
+@click.argument("file_path", type=click.Path(exists=True))
+@click.argument("software_name")
+def track(file_path, software_name):
+    """跟踪文件 - file_path: 文件路径 - software_name: 软件名称"""
+    """
+    跟踪文件，记录文件路径、软件名称和安装时间。
+    
+    参数：
+    - file_path: 文件路径
+    - software_name: 软件名称
+    
+    行为：
+    - 与install() 类似，但只记录文件路径和软件名称，不进行复制。
+    """
+    conn = get_db()
+    cursor = conn.execute("SELECT DISTINCT software_name FROM tracked_files")
+    existing_names = [row[0] for row in cursor.fetchall()]
+    
+    if software_name in existing_names:
+        print(f"软件 '{software_name}' 已存在，请先卸载旧版本")
+        conn.close()
+        return
+
+    file_path = Path(file_path)
+    if file_path.is_file():
+        files_to_copy = [file_path]
+    else:
+        files_to_copy = [root / file for root, _, files in file_path.walk() for file in files]
+
+    try:
+        for file in files_to_copy:
+            conn.execute(
+                "INSERT INTO tracked_files (file_path, software_name, installed_at) VALUES (?, ?, ?)",
+                (str(file), software_name, datetime.now().isoformat()),
+            )
+        conn.commit()
+        print(f"成功跟踪 {software_name}")
+    except Exception as e:
+        conn.rollback()
+        print(f"跟踪失败: {e}")
+        raise
+    finally:
+        conn.close()
 
 @cli.command()
 @click.option("--software", "-s", help="按软件名称筛选")
 @click.option("--all", "-a", is_flag=True, help="显示所有被追踪的文件")
 def list(software, all):
+    """列出被追踪的文件 -s/--software:按软件名称筛选 -a/--all:显示所有被追踪的文件 """
     """
     列出被追踪的文件。
     
@@ -179,7 +225,7 @@ def list(software, all):
             click.echo("No files found.")
         click.echo(f'{software} has files:')
         for row in rows:
-            click.echo(f'{row['file_path']} : installed at {row['installed_at']}')
+            click.echo(f"{row['file_path']} : installed at {row['installed_at']}")
         conn.close()
         return
     elif all:
@@ -212,6 +258,7 @@ def list(software, all):
     "--force", "-f", is_flag=True, help="强制卸载，即使文件缺失也清除数据库记录"
 )
 def uninstall(software_name, force):
+    """卸载指定软件所有追踪文件"""
     """
     卸载指定软件的所有追踪文件。
     
@@ -262,6 +309,7 @@ def uninstall(software_name, force):
 @cli.command()
 @click.argument("keyword")
 def search(keyword):
+    """根据关键词搜索被追踪的文件。"""
     """
     根据关键词搜索被追踪的文件。
     
@@ -293,6 +341,7 @@ def search(keyword):
 @cli.command()
 @click.argument("file_path", type=click.Path(exists=True))
 def untrack(file_path):
+    """停止追踪指定文件，但不删除实际文件。"""
     """
     停止追踪指定文件，但不删除实际文件。
     
